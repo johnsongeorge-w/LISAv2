@@ -57,11 +57,11 @@ Install_Uninstall_LIS() {
 	test_type=$1
 	cd LISISO
 	./install.sh
+	cleanup
 	if [[ "$test_type" == "positive" ]]; then
 		total_hyperv_packages=$(rpm -qa | grep "hyper-v" | wc -l)
 		if [ $total_hyperv_packages -gt 0 ]; then
 			LogMsg "Found $total_hyperv_packages hyper-v packages installed"
-			cleanup
 			LogMsg "Now removing LIS..."
 			./uninstall.sh
 			total_hyperv_packages=$(rpm -qa | grep "hyper-v" | wc -l)
@@ -71,14 +71,12 @@ Install_Uninstall_LIS() {
 			else
 				LogMsg "Error: Found $total_hyperv_packages hyper-v packages installed"
 				LogMsg "Test '$test_type' : FAIL"
-				cleanup
 				SetTestStateFailed
 				exit 0
 			fi
 		else
 			LogMsg "Error: unable to find hyper-v packages"
 			LogMsg "Test '$test_type' : FAIL"
-			cleanup
 			SetTestStateFailed
 			exit 0
 		fi
@@ -90,7 +88,6 @@ Install_Uninstall_LIS() {
 		else
 			LogMsg "Error: Found $total_hyperv_packages hyper-v packages installed"
 			LogMsg "Test '$test_type' : FAIL"
-			cleanup
 			SetTestStateFailed
 			exit 0
 		fi
@@ -99,47 +96,48 @@ Install_Uninstall_LIS() {
 }
 
 cleanup(){
-	cleanup_file_names=$(find / -name file.out | xargs)
-	if [[ $cleanup_file_names != "" ]]; then
-		LogMsg "Removing $cleanup_file_names ..."
-		rm -rf $cleanup_file_names
-	fi
+	[ -f /lib/modules/file.out ] && rm -f /lib/modules/file.out
+	[ -f /boot/file.out ] && rm -f /boot/file.out
 	LogMsg "Cleanup completed."
 }
 
 RunTest() {
 	distro_package_name=RPMS
-	echo "distro_package_name $distro_package_name"
-	test_type=$1
-	distro_version=$(detect_linux_distribution_version)
-	echo "divya $distro_version"
-	distro_version=$(echo $distro_version | tr -d .)
-	echo "jyothi $distro_version"
-	extraspace=1048576
-	MIN_SPACE_FOR_RAMFS_CREATION=157286400
-
 	lib_module_folder="/lib/modules"
 	boot_folder="/boot"
+	
+	MIN_SPACE_FOR_RAMFS_CREATION=157286400   #fetched from spec
+	ROOT_PARTITION_BUFFER_SPACE=10485760     #10MB for log file creation
+	BOOT_PARTITION_BUFFER_SPACE=1048576      #allowed limit of +- 1MB 
+	
+	test_type=$1
+	distro_version=$(detect_linux_distribution_version)
+	distro_version=$(echo $distro_version | cut -d. -f1,2 | tr -d .)
+	echo "DISTRO PACKAGE NAME: $distro_package_name DISTRO VERSION: $distro_version"
 
 	root_partition=$(df -P $lib_module_folder | grep -v Used | awk '{ print $1}')
-	echo "root_partition $root_partition"
 	boot_partition=$(df -P $boot_folder | grep -v Used | awk '{ print $1}')
-	echo "boot_partition $boot_partition"
+	echo "boot_partition $boot_partition - root_partition $root_partition"
 
 	ramdisk_size_factor=1
 	[ $root_partition != $boot_partition ] && ramdisk_size_factor=2
-	echo "ramdisk_size_factor $ramdisk_size_factor"
 
-	root_part_avail_space=$(($(stat -f --format="%a*%S" $lib_module_folder)))
-	echo "root_part_avail_space $root_part_avail_space"
-	boot_part_avail_space=$(($(stat -f --format="%a*%S" $boot_folder)))
-	echo "boot_part_avail_space $boot_part_avail_space"
 	lib_module_required_space=$(rpm --queryformat='%{SIZE}' -qp  LISISO/${distro_package_name}${distro_version}/kmod-microsoft-hyper*x86_64.rpm)
 	ramdisk_required_space=$(stat /boot/initramfs-$(uname -r).img --format="%s")
-	boot_part_required_space=$(expr $ramdisk_required_space)
-	root_part_required_space=$(expr $MIN_SPACE_FOR_RAMFS_CREATION + $ramdisk_size_factor \* $ramdisk_required_space + $lib_module_required_space + $extraspace)
-	echo "lib_module_required_space $lib_module_required_space"
-	echo "ramdisk_required_space $ramdisk_required_space"
+	boot_part_required_space=$(expr $ramdisk_required_space + $BOOT_PARTITION_BUFFER_SPACE)
+	root_part_required_space=$(expr $MIN_SPACE_FOR_RAMFS_CREATION + $ramdisk_size_factor \* $ramdisk_required_space + $lib_module_required_space + $ROOT_PARTITION_BUFFER_SPACE)
+
+	#6.X distro RPM has a limit of 10 MB minimum non root user disk space check.
+	if [[ $distro_version == 6* || $distro_version == 70 || $distro_version == 71 ]];then
+		root_part_avail_space=$(($(stat -f --format="%a*%S" $lib_module_folder)))
+		boot_part_avail_space=$(($(stat -f --format="%a*%S" $boot_folder)))
+		root_part_required_space=$(expr 2 \* $ROOT_PARTITION_BUFFER_SPACE)
+	else
+		root_part_avail_space=$(($(stat -f --format="%f*%S" $lib_module_folder)))
+		boot_part_avail_space=$(($(stat -f --format="%f*%S" $boot_folder)))
+	fi
+	echo "ramdisk_size_factor $ramdisk_size_factor root_part_avail_space $root_part_avail_space boot_part_avail_space $boot_part_avail_space"
+	echo "lib_module_required_space $lib_module_required_space ramdisk_required_space $ramdisk_required_space"
 
 	if [[ $test_type == "positive" ]]; then
 
@@ -148,8 +146,7 @@ RunTest() {
 	else
 		boot_part_required_space=$(expr $boot_part_required_space / 2)
 		root_part_required_space=$(expr $root_part_required_space / 2)
-		echo "negative: root_part_required_space : $root_part_required_space"
-		echo "negative: boot_part_required_space: $boot_part_required_space"
+		echo "negative: root_part_required_space : $root_part_required_space boot_part_required_space: $boot_part_required_space"
 	fi
 
 	if [[ $boot_partition == $root_partition ]]; then
@@ -169,8 +166,7 @@ RunTest() {
 		LogMsg "boot and modules do not share the same partition."
 		single_partition_file_size=$(expr $root_part_avail_space - $root_part_required_space)
 		single_partition_file_size_boot=$(expr $boot_part_avail_space - $boot_part_required_space)
-		echo "single_partition_file_size $single_partition_file_size"
-		echo "single_partition_file_size_boot $single_partition_file_size_boot"
+		echo "file size - root partition: $single_partition_file_size boot partition: $single_partition_file_size_boot"
 		CreateFile "${single_partition_file_size}" /lib/modules/file.out
 		singe_partition_created_file_size=$(ls -l /lib/modules/file.out | awk '{print $5}'  | tail -1)
 		CreateFile "${single_partition_file_size_boot}" /boot/file.out
